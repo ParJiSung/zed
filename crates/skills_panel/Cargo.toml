@@ -1,0 +1,30 @@
+[package]
+name = "skills_panel"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/skills_panel.rs"
+doctest = false
+
+[dependencies]
+agent_skills.workspace = true
+anyhow.workspace = true
+collections.workspace = true
+fs.workspace = true
+futures.workspace = true
+gpui.workspace = true
+project.workspace = true
+serde.workspace = true
+serde_yaml_ng.workspace = true
+ui.workspace = true
+util.workspace = true
+workspace.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true

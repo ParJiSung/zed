@@ -16747,6 +16747,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56199f7ddabf13fe5074ce809e7d3f42b42ae711800501b5b16ea82ad029c39d"
 
 [[package]]
+name = "skills_panel"
+version = "0.1.0"
+dependencies = [
+ "agent_skills",
+ "anyhow",
+ "collections",
+ "fs",
+ "futures 0.3.34",
+ "gpui",
+ "pretty_assertions",
+ "project",
+ "serde",
+ "serde_yaml_ng",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "skrifa"
 version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -22505,6 +22524,7 @@ dependencies = [
  "settings_ui",
  "shellexpand",
  "sidebar",
+ "skills_panel",
  "smol",
  "snippet_provider",
  "snippets_ui",
