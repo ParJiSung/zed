@@ -103,6 +103,8 @@ mod agents_panel;
 mod install_plugin;
 mod plugins_panel;
 mod reels;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod reels_native;
 mod spotify_api;
 mod spotify_panel;
 mod spotify_player;

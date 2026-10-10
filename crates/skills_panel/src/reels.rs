@@ -1,30 +1,48 @@
-use anyhow::{Context as _, Result};
+#[cfg(target_os = "linux")]
+use anyhow::Context as _;
+use anyhow::Result;
+#[cfg(target_os = "linux")]
 use futures::{AsyncWriteExt as _, StreamExt as _, channel::mpsc};
+#[cfg(target_os = "linux")]
+use gpui::Task;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+use gpui::canvas;
 use gpui::{
-    App, AsyncWindowContext, Entity, FocusHandle, Focusable, Pixels, Task, WeakEntity, Window,
-    canvas, prelude::*,
+    App, AsyncWindowContext, Entity, FocusHandle, Focusable, Pixels, WeakEntity, Window, prelude::*,
 };
+#[cfg(target_os = "linux")]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use ui::{Button, ButtonStyle, prelude::*};
+use ui::{Button, ButtonStyle, IconButton, Tooltip, prelude::*};
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use util::ResultExt as _;
+#[cfg(target_os = "linux")]
+use workspace::notifications::DetachAndPromptErr as _;
 use workspace::{
     Workspace,
     dock::{DockPosition, Panel, PanelEvent},
-    notifications::DetachAndPromptErr as _,
 };
 
-use crate::ToggleReelsFocus;
+use crate::{MEDIA_BUTTON_GROUP, ToggleReelsFocus};
 
+const REELS_URL: &str = "https://www.instagram.com/reels/";
+
+#[cfg(target_os = "linux")]
 const REELS_WINDOW_SCRIPT: &str = include_str!("../assets/reels_window.py");
 
+#[cfg(target_os = "linux")]
 type DeviceBounds = (i32, i32, i32, i32);
 
+/// The helper process that shows Reels on Linux. WebKitGTK cannot be
+/// embedded in Zed's window there, so it is a separate window kept on top of
+/// the panel.
+#[cfg(target_os = "linux")]
 struct ReelsWindow {
     process: smol::process::Child,
     commands: Option<mpsc::UnboundedSender<String>>,
     _writer: Option<Task<()>>,
 }
 
+#[cfg(target_os = "linux")]
 impl ReelsWindow {
     fn send(&self, command: String) {
         if let Some(commands) = &self.commands {
@@ -41,8 +59,16 @@ pub struct ReelsPanel {
     focus_handle: FocusHandle,
     position: DockPosition,
     active: bool,
+    #[cfg(target_os = "linux")]
     reels_window: Option<ReelsWindow>,
+    #[cfg(target_os = "linux")]
     embedded_bounds: Option<DeviceBounds>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    native_view: Option<crate::reels_native::NativeReelsView>,
+    /// Set when the web view could not be created, so it is not retried on
+    /// every frame.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    native_error: Option<SharedString>,
 }
 
 impl ReelsPanel {
@@ -58,11 +84,18 @@ impl ReelsPanel {
             focus_handle: cx.focus_handle(),
             position: DockPosition::Left,
             active: false,
+            #[cfg(target_os = "linux")]
             reels_window: None,
+            #[cfg(target_os = "linux")]
             embedded_bounds: None,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            native_view: None,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            native_error: None,
         }
     }
 
+    #[cfg(target_os = "linux")]
     fn embedding_parent(window: &Window) -> Option<u32> {
         match HasWindowHandle::window_handle(window).ok()?.as_raw() {
             RawWindowHandle::Xcb(handle) => Some(handle.window.get()),
@@ -71,6 +104,7 @@ impl ReelsPanel {
         }
     }
 
+    #[cfg(target_os = "linux")]
     fn sync_embedded_bounds(
         &mut self,
         bounds: gpui::Bounds<Pixels>,
@@ -111,6 +145,7 @@ impl ReelsPanel {
         }
     }
 
+    #[cfg(target_os = "linux")]
     fn start_window(&mut self, parent: Option<u32>, window: &mut Window, cx: &mut Context<Self>) {
         let embedded = parent.is_some();
         cx.spawn(async move |this, cx| {
@@ -146,14 +181,107 @@ impl ReelsPanel {
         );
     }
 
-    fn hide_embedded_window(&mut self) {
-        if let Some(reels_window) = &self.reels_window {
-            reels_window.send("hide\n".into());
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn sync_native_view(
+        &mut self,
+        bounds: gpui::Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.active || self.native_error.is_some() {
+            return;
         }
-        self.embedded_bounds = None;
+        match &mut self.native_view {
+            Some(native_view) => native_view.show_at(bounds).log_err(),
+            None => {
+                let data_directory = paths::data_dir().join("reels").join("webview");
+                match crate::reels_native::NativeReelsView::new(
+                    REELS_URL,
+                    data_directory,
+                    bounds,
+                    window,
+                ) {
+                    Ok(native_view) => self.native_view = Some(native_view),
+                    Err(error) => {
+                        self.native_error = Some(format!("{error:#}").into());
+                        cx.notify();
+                    }
+                }
+            }
+        };
+    }
+
+    fn navigate(&self, direction: &str) {
+        #[cfg(target_os = "linux")]
+        if let Some(reels_window) = &self.reels_window {
+            reels_window.send(format!("navigate {direction}\n"));
+        }
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if let Some(native_view) = &self.native_view {
+            native_view.navigate(direction == "next").log_err();
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        let _ = direction;
+    }
+
+    fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .flex_none()
+            .w_full()
+            .h_8()
+            .px_2()
+            .justify_between()
+            .items_center()
+            .child(
+                Label::new("Reels")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        IconButton::new("previous-reel", IconName::ChevronUp)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("Previous reel"))
+                            .on_click(cx.listener(|this, _, _, _| this.navigate("previous"))),
+                    )
+                    .child(
+                        IconButton::new("next-reel", IconName::ChevronDown)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("Next reel"))
+                            .on_click(cx.listener(|this, _, _, _| this.navigate("next"))),
+                    ),
+            )
+    }
+
+    fn hide_embedded_view(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(reels_window) = &self.reels_window {
+                reels_window.send("hide\n".into());
+            }
+            self.embedded_bounds = None;
+        }
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if let Some(native_view) = &mut self.native_view {
+            native_view.hide().log_err();
+        }
+    }
+
+    fn render_browser_fallback(&self, message: SharedString) -> impl IntoElement {
+        v_flex()
+            .gap_3()
+            .child(Label::new(message).color(Color::Muted))
+            .child(
+                Button::new("open-reels-browser", "Open Reels in your browser")
+                    .style(ButtonStyle::Filled)
+                    .on_click(|_, _, cx| cx.open_url(REELS_URL)),
+            )
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn launch_reels_window(parent: Option<u32>) -> Result<ReelsWindow> {
     let directory = paths::data_dir().join("reels");
     smol::fs::create_dir_all(&directory)
@@ -238,13 +366,17 @@ impl Panel for ReelsPanel {
     fn set_active(&mut self, active: bool, _window: &mut Window, cx: &mut Context<Self>) {
         self.active = active;
         if !active {
-            self.hide_embedded_window();
+            self.hide_embedded_view();
         }
         cx.notify();
     }
 
     fn activation_priority(&self) -> u32 {
-        10
+        100
+    }
+
+    fn button_group(&self) -> u32 {
+        MEDIA_BUTTON_GROUP
     }
 }
 
@@ -255,46 +387,84 @@ impl Render for ReelsPanel {
             .track_focus(&self.focus_handle)
             .size_full();
 
-        if Self::embedding_parent(window).is_some() {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            let _ = window;
+            if let Some(error) = self.native_error.clone() {
+                return container.p_4().child(self.render_browser_fallback(
+                    format!("Reels could not be shown here: {error}").into(),
+                ));
+            }
             let panel = cx.entity().downgrade();
-            return container.child(
+            return container.child(self.render_toolbar(cx)).child(
                 canvas(
                     move |bounds, window, cx| {
-                        let scale_factor = window.scale_factor();
                         panel
-                            .update(cx, |panel, cx| {
-                                panel.sync_embedded_bounds(bounds, scale_factor, window, cx)
-                            })
+                            .update(cx, |panel, cx| panel.sync_native_view(bounds, window, cx))
                             .log_err();
                     },
                     |_, _, _, _| {},
                 )
-                .size_full(),
+                .w_full()
+                .flex_1(),
             );
         }
 
-        container
-            .p_4()
-            .gap_3()
-            .child(
-                Label::new(
-                    "Reels can only be embedded when Zed runs on X11. \
-                     Start Zed with WAYLAND_DISPLAY unset to embed them here.",
+        #[cfg(target_os = "linux")]
+        {
+            if Self::embedding_parent(window).is_some() {
+                let panel = cx.entity().downgrade();
+                return container.child(self.render_toolbar(cx)).child(
+                    canvas(
+                        move |bounds, window, cx| {
+                            let scale_factor = window.scale_factor();
+                            panel
+                                .update(cx, |panel, cx| {
+                                    panel.sync_embedded_bounds(bounds, scale_factor, window, cx)
+                                })
+                                .log_err();
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .w_full()
+                    .flex_1(),
+                );
+            }
+
+            return container
+                .p_4()
+                .gap_3()
+                .child(
+                    Label::new(
+                        "Reels can only be embedded when Zed runs on X11. \
+                         Start Zed with WAYLAND_DISPLAY unset to embed them here.",
+                    )
+                    .color(Color::Muted),
                 )
-                .color(Color::Muted),
+                .child(
+                    Button::new("open-reels-window", "Open in a separate window")
+                        .style(ButtonStyle::Filled)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            let window_is_running = this
+                                .reels_window
+                                .as_mut()
+                                .is_some_and(|reels_window| reels_window.is_running());
+                            if !window_is_running {
+                                this.start_window(None, window, cx);
+                            }
+                        })),
+                )
+                .child(self.render_browser_fallback("Or watch them in your browser.".into()));
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        {
+            let _ = window;
+            container.p_4().child(
+                self.render_browser_fallback(
+                    "Reels are not embedded in Zed on this platform.".into(),
+                ),
             )
-            .child(
-                Button::new("open-reels-window", "Open in a separate window")
-                    .style(ButtonStyle::Filled)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        let window_is_running = this
-                            .reels_window
-                            .as_mut()
-                            .is_some_and(|reels_window| reels_window.is_running());
-                        if !window_is_running {
-                            this.start_window(None, window, cx);
-                        }
-                    })),
-            )
+        }
     }
 }

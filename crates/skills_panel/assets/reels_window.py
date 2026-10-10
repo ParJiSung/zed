@@ -96,6 +96,26 @@ def run_embedded():
             window.move(placement[0], placement[1])
         return True
 
+    def press_key(keyval):
+        # Instagram's reels viewer moves between reels on the arrow keys. The
+        # event is fed to the view directly because Zed keeps keyboard focus.
+        if not window.get_visible():
+            return
+        web_view.grab_focus()
+        keymap = Gdk.Keymap.get_for_display(gdk_display)
+        found, keys = keymap.get_entries_for_keyval(keyval)
+        keyboard = gdk_display.get_default_seat().get_keyboard()
+        for event_type in (Gdk.EventType.KEY_PRESS, Gdk.EventType.KEY_RELEASE):
+            event = Gdk.Event.new(event_type)
+            event.key.window = gdk_window
+            event.key.send_event = 1
+            event.key.time = Gdk.CURRENT_TIME
+            event.key.keyval = keyval
+            if found and keys:
+                event.key.hardware_keycode = keys[0].keycode
+            event.set_device(keyboard)
+            web_view.event(event)
+
     def apply_command(line):
         parts = line.split()
         if not parts:
@@ -107,6 +127,8 @@ def run_embedded():
             state["visible"] = True
         elif parts[0] == "hide":
             state["visible"] = False
+        elif parts[0] == "navigate" and len(parts) == 2:
+            press_key(Gdk.KEY_Down if parts[1] == "next" else Gdk.KEY_Up)
         elif parts[0] == "quit":
             Gtk.main_quit()
         update_placement()

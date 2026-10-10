@@ -960,6 +960,7 @@ webpki-roots = "1.0.8"
 webrtc-sys = "0.3.23"
 wgpu = { version = "29.0", default-features = false }
 which = "8"
+wry = "0.57"
 windows-core = "0.62"
 windows-registry = "0.6.0"
 xkbcommon = { version = "0.8", default-features = false }
