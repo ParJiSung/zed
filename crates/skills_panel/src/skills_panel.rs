@@ -95,6 +95,7 @@ macro_rules! impl_dock_panel {
 mod agents_panel;
 mod install_plugin;
 mod plugins_panel;
+mod reels;
 
 use std::{
     path::{Path, PathBuf},
@@ -115,6 +116,7 @@ use workspace::{OpenOptions, Workspace, dock::DockPosition};
 use agents_panel::AgentsPanel;
 use install_plugin::InstallPluginModal;
 use plugins_panel::PluginsPanel;
+use reels::ReelsPanel;
 
 actions!(
     skills_panel,
@@ -127,6 +129,8 @@ actions!(
         TogglePluginsFocus,
         /// Opens the dialog for installing a plugin from a marketplace or a GitHub repository.
         InstallPlugin,
+        /// Toggles focus on the Instagram reels panel.
+        ToggleReelsFocus,
     ]
 );
 
@@ -143,6 +147,9 @@ pub fn init(cx: &mut App) {
         workspace.register_action(|workspace, _: &TogglePluginsFocus, window, cx| {
             workspace.toggle_panel_focus::<PluginsPanel>(window, cx);
         });
+        workspace.register_action(|workspace, _: &ToggleReelsFocus, window, cx| {
+            workspace.toggle_panel_focus::<ReelsPanel>(window, cx);
+        });
         workspace.register_action(|workspace, _: &InstallPlugin, window, cx| {
             InstallPluginModal::toggle(workspace, window, cx);
         });
@@ -152,10 +159,11 @@ pub fn init(cx: &mut App) {
 
 /// Loads the skills, agents and plugins panels and adds them to the workspace.
 pub async fn add_panels(workspace: WeakEntity<Workspace>, mut cx: AsyncWindowContext) {
-    let (skills_panel, agents_panel, plugins_panel) = futures::join!(
+    let (skills_panel, agents_panel, plugins_panel, reels_panel) = futures::join!(
         SkillsPanel::load(workspace.clone(), cx.clone()),
         AgentsPanel::load(workspace.clone(), cx.clone()),
         PluginsPanel::load(workspace.clone(), cx.clone()),
+        ReelsPanel::load(workspace.clone(), cx.clone()),
     );
     workspace
         .update_in(&mut cx, |workspace, window, cx| {
@@ -175,6 +183,9 @@ pub async fn add_panels(workspace: WeakEntity<Workspace>, mut cx: AsyncWindowCon
                 .context("failed to load plugins panel")
                 .log_err()
             {
+                workspace.add_panel(panel, window, cx);
+            }
+            if let Some(panel) = reels_panel.context("failed to load reels panel").log_err() {
                 workspace.add_panel(panel, window, cx);
             }
         })
