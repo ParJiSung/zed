@@ -10,6 +10,7 @@ macro_rules! impl_dock_panel {
         icon: $icon:expr,
         toggle: $toggle:expr,
         priority: $priority:literal
+        $(, group: $group:expr)?
     ) => {
         impl gpui::Focusable for $panel {
             fn focus_handle(&self, _cx: &gpui::App) -> gpui::FocusHandle {
@@ -88,6 +89,12 @@ macro_rules! impl_dock_panel {
             fn activation_priority(&self) -> u32 {
                 $priority
             }
+
+            $(
+                fn button_group(&self) -> u32 {
+                    $group
+                }
+            )?
         }
     };
 }
@@ -96,6 +103,9 @@ mod agents_panel;
 mod install_plugin;
 mod plugins_panel;
 mod reels;
+mod spotify_api;
+mod spotify_panel;
+mod spotify_player;
 
 use std::{
     path::{Path, PathBuf},
@@ -117,6 +127,7 @@ use agents_panel::AgentsPanel;
 use install_plugin::InstallPluginModal;
 use plugins_panel::PluginsPanel;
 use reels::ReelsPanel;
+use spotify_panel::SpotifyPanel;
 
 actions!(
     skills_panel,
@@ -131,8 +142,13 @@ actions!(
         InstallPlugin,
         /// Toggles focus on the Instagram reels panel.
         ToggleReelsFocus,
+        /// Toggles focus on the Spotify panel.
+        ToggleSpotifyFocus,
     ]
 );
+
+/// Button group for the media panels, kept apart from the coding panels.
+const MEDIA_BUTTON_GROUP: u32 = 1;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 
@@ -149,6 +165,9 @@ pub fn init(cx: &mut App) {
         });
         workspace.register_action(|workspace, _: &ToggleReelsFocus, window, cx| {
             workspace.toggle_panel_focus::<ReelsPanel>(window, cx);
+        });
+        workspace.register_action(|workspace, _: &ToggleSpotifyFocus, window, cx| {
+            workspace.toggle_panel_focus::<SpotifyPanel>(window, cx);
         });
         workspace.register_action(|workspace, _: &InstallPlugin, window, cx| {
             InstallPluginModal::toggle(workspace, window, cx);
@@ -190,6 +209,20 @@ pub async fn add_panels(workspace: WeakEntity<Workspace>, mut cx: AsyncWindowCon
             }
         })
         .log_err();
+
+    {
+        let spotify_panel = SpotifyPanel::load(workspace.clone(), cx.clone()).await;
+        workspace
+            .update_in(&mut cx, |workspace, window, cx| {
+                if let Some(panel) = spotify_panel
+                    .context("failed to load spotify panel")
+                    .log_err()
+                {
+                    workspace.add_panel(panel, window, cx);
+                }
+            })
+            .log_err();
+    }
 }
 
 fn poll_task<T: 'static>(cx: &mut Context<T>, refresh: fn(&mut T, &mut Context<T>)) -> Task<()> {
