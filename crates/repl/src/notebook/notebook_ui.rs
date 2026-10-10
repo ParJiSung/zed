@@ -6,7 +6,6 @@ use anyhow::{Context as _, Result};
 use client::proto::ViewId;
 use collections::HashMap;
 use editor::DisplayPoint;
-use feature_flags::{FeatureFlagAppExt as _, NotebookFeatureFlag};
 use futures::FutureExt;
 use futures::future::Shared;
 use gpui::{
@@ -72,21 +71,9 @@ pub(crate) const CONTROL_SIZE: f32 = 20.0;
 const NOTEBOOK_EXTENSION: &str = "ipynb";
 
 pub fn init(cx: &mut App) {
-    if cx.has_flag::<NotebookFeatureFlag>() || std::env::var("LOCAL_NOTEBOOK_DEV").is_ok() {
-        workspace::register_project_item::<NotebookEditor>(cx);
-    }
-
-    cx.observe_flag::<NotebookFeatureFlag, _>({
-        move |flag, cx| {
-            if *flag {
-                workspace::register_project_item::<NotebookEditor>(cx);
-            } else {
-                // todo: there is no way to unregister a project item, so if the feature flag
-                // gets turned off they need to restart Zed.
-            }
-        }
-    })
-    .detach();
+    // This fork ships the notebook editor on every platform rather than
+    // behind the `notebooks` feature flag.
+    workspace::register_project_item::<NotebookEditor>(cx);
 }
 
 pub struct NotebookEditor {
