@@ -6,19 +6,19 @@ use std::{
 use anyhow::Result;
 use collections::HashMap;
 use fs::Fs;
-use gpui::{AsyncWindowContext, Entity, FocusHandle, Task, WeakEntity};
+use gpui::{Action as _, AsyncWindowContext, Entity, FocusHandle, Task, WeakEntity};
 use serde::Deserialize;
-use ui::{ListItem, ListItemSpacing, Tooltip, prelude::*};
+use ui::{IconButton, ListItem, ListItemSpacing, Tooltip, prelude::*};
 use util::ResultExt as _;
 use workspace::{Workspace, dock::DockPosition};
 
 use crate::{
-    TogglePluginsFocus, codex_home, empty_message, file_name_string, load_json, open_path,
-    poll_task, read_dir_paths, section_header,
+    InstallPlugin, TogglePluginsFocus, codex_home, empty_message, file_name_string, load_json,
+    open_path, poll_task, read_dir_paths, section_header,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum PluginHost {
+pub(crate) enum PluginHost {
     Claude,
     Codex,
 }
@@ -109,6 +109,29 @@ impl PluginsPanel {
         });
     }
 
+    fn render_toolbar(&self) -> impl IntoElement {
+        h_flex()
+            .flex_none()
+            .w_full()
+            .h_8()
+            .px_2()
+            .justify_between()
+            .items_center()
+            .child(
+                Label::new("Installed plugins")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(
+                IconButton::new("install-plugin", IconName::Plus)
+                    .icon_size(IconSize::Small)
+                    .tooltip(Tooltip::text("Install a plugin"))
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(InstallPlugin.boxed_clone(), cx);
+                    }),
+            )
+    }
+
     fn render_plugin(
         &self,
         index: usize,
@@ -174,7 +197,8 @@ impl Render for PluginsPanel {
             .key_context("PluginsPanel")
             .track_focus(&self.focus_handle)
             .size_full()
-            .overflow_y_scroll();
+            .overflow_y_scroll()
+            .child(self.render_toolbar());
 
         if self.plugins.is_empty() {
             return content
@@ -252,6 +276,8 @@ struct ClaudeSettings {
 }
 
 async fn load_claude_plugins(fs: &dyn Fs, home: &Path, plugins: &mut Vec<PluginEntry>) {
+    load_claude_synced_plugins(fs, home, plugins).await;
+
     let Some(installed) = load_json::<ClaudeInstalledPlugins>(
         fs,
         &home.join(".claude/plugins/installed_plugins.json"),
@@ -312,6 +338,48 @@ async fn load_claude_plugins(fs: &dyn Fs, home: &Path, plugins: &mut Vec<PluginE
                 ),
                 enabled,
                 path_to_open,
+            });
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct SyncedPluginMeta {
+    marketplace_name: Option<String>,
+}
+
+/// Plugins synced from claude.ai are not listed in `installed_plugins.json`.
+/// They live at `plugins/synced/{account}/{plugin}`, each with a sibling
+/// `{plugin}.meta.json` naming its marketplace.
+async fn load_claude_synced_plugins(fs: &dyn Fs, home: &Path, plugins: &mut Vec<PluginEntry>) {
+    let synced_root = home.join(".claude/plugins/synced");
+    for account_dir in read_dir_paths(fs, &synced_root).await {
+        if file_name_string(&account_dir).starts_with('.') {
+            continue;
+        }
+        for plugin_dir in read_dir_paths(fs, &account_dir).await {
+            let directory_name = file_name_string(&plugin_dir);
+            if directory_name.starts_with('.') {
+                continue;
+            }
+            let manifest_path = plugin_dir.join(".claude-plugin/plugin.json");
+            let Some(manifest) = load_json::<PluginManifest>(fs, &manifest_path).await else {
+                continue;
+            };
+            let meta_path = account_dir.join(format!("{directory_name}.meta.json"));
+            let marketplace = load_json::<SyncedPluginMeta>(fs, &meta_path)
+                .await
+                .and_then(|meta| meta.marketplace_name)
+                .unwrap_or_default();
+            plugins.push(PluginEntry {
+                host: PluginHost::Claude,
+                name: manifest.name.unwrap_or(directory_name).into(),
+                marketplace: marketplace.into(),
+                version: manifest.version.unwrap_or_default().into(),
+                description: manifest.description.unwrap_or_default().into(),
+                scope: Some("synced".into()),
+                enabled: None,
+                path_to_open: Some(manifest_path),
             });
         }
     }

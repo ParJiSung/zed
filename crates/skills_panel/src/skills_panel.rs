@@ -93,6 +93,7 @@ macro_rules! impl_dock_panel {
 }
 
 mod agents_panel;
+mod install_plugin;
 mod plugins_panel;
 
 use std::{
@@ -112,6 +113,7 @@ use util::ResultExt as _;
 use workspace::{OpenOptions, Workspace, dock::DockPosition};
 
 use agents_panel::AgentsPanel;
+use install_plugin::InstallPluginModal;
 use plugins_panel::PluginsPanel;
 
 actions!(
@@ -123,6 +125,8 @@ actions!(
         ToggleAgentsFocus,
         /// Toggles focus on the plugins panel.
         TogglePluginsFocus,
+        /// Opens the dialog for installing a plugin from a marketplace or a GitHub repository.
+        InstallPlugin,
     ]
 );
 
@@ -138,6 +142,9 @@ pub fn init(cx: &mut App) {
         });
         workspace.register_action(|workspace, _: &TogglePluginsFocus, window, cx| {
             workspace.toggle_panel_focus::<PluginsPanel>(window, cx);
+        });
+        workspace.register_action(|workspace, _: &InstallPlugin, window, cx| {
+            InstallPluginModal::toggle(workspace, window, cx);
         });
     })
     .detach();
