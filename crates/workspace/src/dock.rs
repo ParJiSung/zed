@@ -89,6 +89,11 @@ pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized {
         None
     }
     fn activation_priority(&self) -> u32;
+    /// Panels whose buttons share a group are drawn next to each other, with a
+    /// divider between groups.
+    fn button_group(&self) -> u32 {
+        0
+    }
     fn enabled(&self, _cx: &App) -> bool {
         true
     }
@@ -131,6 +136,7 @@ pub trait PanelHandle: Send + Sync {
     fn activation_focus_handle(&self, cx: &App) -> FocusHandle;
     fn to_any(&self) -> AnyView;
     fn activation_priority(&self, cx: &App) -> u32;
+    fn button_group(&self, cx: &App) -> u32;
     fn enabled(&self, cx: &App) -> bool;
     fn is_agent_panel(&self, cx: &App) -> bool;
     fn hide_button_setting(&self, cx: &App) -> Option<HideStatusItem>;
@@ -257,6 +263,10 @@ where
 
     fn activation_priority(&self, cx: &App) -> u32 {
         self.read(cx).activation_priority()
+    }
+
+    fn button_group(&self, cx: &App) -> u32 {
+        self.read(cx).button_group()
     }
 
     fn enabled(&self, cx: &App) -> bool {
@@ -1437,8 +1447,10 @@ impl Render for PanelButtons {
 
                 let focus_handle = dock.focus_handle(cx);
                 let icon_label = entry.panel.icon_label(window, cx);
+                let button_group = entry.panel.button_group(cx);
 
-                Some(
+                Some((
+                    button_group,
                     right_click_menu(name)
                         .menu(move |window, cx| {
                             const POSITIONS: [DockPosition; 3] = [
@@ -1559,13 +1571,28 @@ impl Render for PanelButtons {
                                 |this, count| this.child(CountBadge::new(count)),
                             )
                         }),
-                )
+                ))
             })
             .collect();
 
         if dock_position == DockPosition::Right {
             buttons.reverse();
         }
+
+        let mut previous_group = None;
+        let buttons: Vec<AnyElement> = buttons
+            .into_iter()
+            .flat_map(|(group, button)| {
+                let divider =
+                    (previous_group.is_some_and(|previous| previous != group)).then(|| {
+                        Divider::vertical()
+                            .color(DividerColor::Border)
+                            .into_any_element()
+                    });
+                previous_group = Some(group);
+                divider.into_iter().chain([button.into_any_element()])
+            })
+            .collect();
 
         let has_buttons = !buttons.is_empty();
 
