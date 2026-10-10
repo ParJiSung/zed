@@ -202,7 +202,9 @@ async fn scan_dispatches(fs: &dyn Fs, project_roots: &[PathBuf]) -> Vec<Dispatch
     {
         let open_files = files_open_by_any_process();
         for dispatch in &mut dispatches {
-            if open_files.contains(&dispatch.log_path) {
+            if dispatch.status == DispatchStatus::NoResult
+                && is_still_being_written(fs, &open_files, &dispatch.log_path).await
+            {
                 dispatch.status = DispatchStatus::Running;
             }
         }
@@ -338,6 +340,38 @@ fn files_open_by_any_process() -> HashSet<PathBuf> {
 #[cfg(not(target_os = "linux"))]
 fn files_open_by_any_process() -> HashSet<PathBuf> {
     HashSet::default()
+}
+
+/// How recently a log must have been written to count as a live worker on
+/// platforms where open file descriptors cannot be listed.
+#[cfg(not(target_os = "linux"))]
+const RECENT_WRITE_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+
+#[cfg(target_os = "linux")]
+async fn is_still_being_written(
+    _fs: &dyn Fs,
+    open_files: &HashSet<PathBuf>,
+    log_path: &Path,
+) -> bool {
+    open_files.contains(log_path)
+}
+
+/// Without a portable way to see which files a process holds open, a log that
+/// is still growing is the best sign that its worker is alive.
+#[cfg(not(target_os = "linux"))]
+async fn is_still_being_written(
+    fs: &dyn Fs,
+    _open_files: &HashSet<PathBuf>,
+    log_path: &Path,
+) -> bool {
+    let Some(metadata) = fs.metadata(log_path).await.log_err().flatten() else {
+        return false;
+    };
+    metadata
+        .mtime
+        .timestamp_for_user()
+        .elapsed()
+        .is_ok_and(|elapsed| elapsed < RECENT_WRITE_WINDOW)
 }
 
 #[cfg(test)]

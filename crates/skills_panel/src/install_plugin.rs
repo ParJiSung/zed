@@ -919,9 +919,28 @@ fn truncate_output(output: &str) -> String {
 }
 
 fn find_program(program: &str, path_variable: &str) -> Option<PathBuf> {
+    let names = program_file_names(program);
     std::env::split_paths(path_variable)
-        .map(|directory| directory.join(program))
+        .flat_map(|directory| names.iter().map(move |name| directory.join(name)))
         .find(|candidate| candidate.is_file())
+}
+
+/// On Windows, command line tools installed through npm are `.cmd` shims and
+/// others are `.exe` files, so the bare name is never the file on disk.
+#[cfg(windows)]
+fn program_file_names(program: &str) -> Vec<String> {
+    let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    extensions
+        .split(';')
+        .filter(|extension| !extension.is_empty())
+        .map(|extension| format!("{program}{}", extension.to_lowercase()))
+        .chain([program.to_string()])
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn program_file_names(program: &str) -> Vec<String> {
+    vec![program.to_string()]
 }
 
 /// Runs the host's command line tool. The program is looked up on the PATH of
