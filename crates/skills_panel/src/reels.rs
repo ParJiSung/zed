@@ -192,7 +192,9 @@ impl ReelsPanel {
             return;
         }
         match &mut self.native_view {
-            Some(native_view) => native_view.show_at(bounds).log_err(),
+            Some(native_view) => {
+                native_view.show_at(bounds).log_err();
+            }
             None => {
                 let data_directory = paths::data_dir().join("reels").join("webview");
                 match crate::reels_native::NativeReelsView::new(
