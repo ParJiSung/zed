@@ -16759,6 +16759,7 @@ dependencies = [
  "pretty_assertions",
  "project",
  "serde",
+ "serde_json",
  "serde_yaml_ng",
  "ui",
  "util",
