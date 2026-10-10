@@ -301,6 +301,23 @@ mod server {
                     return;
                 }
 
+                // Browsers also ask the loopback server for things like
+                // `/favicon.ico`, sometimes right after a previous sign-in's
+                // page. Those are not the callback, so ignore them and keep
+                // waiting instead of failing the sign-in.
+                if raw_path != expected_path {
+                    let response = tiny_http::Response::from_string("Not found")
+                        .with_status_code(404)
+                        .with_header(
+                            tiny_http::Header::from_str("Connection: close")
+                                .expect("failed to construct response header"),
+                        );
+                    if let Err(err) = request.respond(response) {
+                        log::error!("Failed to send OAuth not-found response: {}", err);
+                    }
+                    continue;
+                }
+
                 let result = handle_oauth_callback_request(&request, expected_path);
 
                 let (status_code, body) = match &result {
@@ -491,3 +508,55 @@ pub use server::{
     OAuthCallbackParams, OAuthCallbackServerConfig, start_oauth_callback_server,
     start_oauth_callback_server_with_config,
 };
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod tests {
+    use super::*;
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpStream;
+
+    fn send_request(redirect_uri: &str, path_and_query: &str) -> String {
+        let address = redirect_uri
+            .trim_start_matches("http://")
+            .split('/')
+            .next()
+            .expect("redirect URI has a host");
+        let mut stream = TcpStream::connect(address).expect("connect to callback server");
+        write!(
+            stream,
+            "GET {path_and_query} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
+        )
+        .expect("write request");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("read response");
+        response
+    }
+
+    #[test]
+    fn stray_requests_do_not_end_the_sign_in() {
+        let (redirect_uri, callback) =
+            start_oauth_callback_server_with_config(OAuthCallbackServerConfig {
+                path: "/login",
+                ..OAuthCallbackServerConfig::default()
+            })
+            .expect("start callback server");
+
+        let favicon_response = send_request(&redirect_uri, "/favicon.ico");
+        assert!(
+            favicon_response.starts_with("HTTP/1.1 404"),
+            "{favicon_response}"
+        );
+
+        let callback_response = send_request(&redirect_uri, "/login?code=abc&state=xyz");
+        assert!(
+            callback_response.starts_with("HTTP/1.1 200"),
+            "{callback_response}"
+        );
+
+        let params = futures::executor::block_on(callback)
+            .expect("callback channel stays open")
+            .expect("callback succeeds");
+        assert_eq!(params.code, "abc");
+        assert_eq!(params.state, "xyz");
+    }
+}
