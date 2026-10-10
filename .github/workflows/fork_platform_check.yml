@@ -1,0 +1,29 @@
+# Compile-checks this fork's own crates on macOS and Windows, which the
+# Linux machine it is developed on cannot build for.
+name: fork_platform_check
+
+on:
+  push:
+    branches:
+      - skills-panel
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the fork's crates
+        run: cargo check --locked -p skills_panel -p repl -p workspace -p oauth_callback_server

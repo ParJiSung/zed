@@ -1,0 +1,101 @@
+# Builds this fork of Zed for Linux, macOS and Windows and publishes the
+# installers as a GitHub Release when a `v*` tag is pushed. It can also be run
+# by hand from the Actions tab, which builds without publishing.
+#
+# The builds are not code signed: the bundle scripts skip signing when the
+# signing secrets are absent.
+name: fork_release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: "1"
+  # Compiled into the binary. It turns off auto-update, which would otherwise
+  # replace this fork with the official Zed release.
+  ZED_UPDATE_EXPLANATION: "This is a custom build of Zed. Download new versions from https://github.com/${{ github.repository }}/releases"
+
+jobs:
+  bundle_linux_x86_64:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - name: Install build dependencies
+        run: ./script/linux
+      - name: Download the WASI SDK
+        run: ./script/download-wasi-sdk
+      - name: Bundle
+        run: ./script/bundle-linux --skip-sentry
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zed-linux-x86_64.tar.gz
+          path: target/release/zed-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  bundle_mac_aarch64:
+    runs-on: macos-14
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Bundle
+        run: ./script/bundle-mac aarch64-apple-darwin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Zed-aarch64.dmg
+          path: target/aarch64-apple-darwin/release/Zed-aarch64.dmg
+          if-no-files-found: error
+
+  bundle_windows_x86_64:
+    runs-on: windows-2022
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - name: Point the bundle script at the runner's Visual Studio
+        # bundle-windows.ps1 expects the Community edition; GitHub's runners
+        # have Enterprise.
+        shell: pwsh
+        run: |
+          $root = "C:\Program Files\Microsoft Visual Studio\2022"
+          if (-not (Test-Path "$root\Community")) {
+            New-Item -ItemType Junction -Path "$root\Community" -Target "$root\Enterprise" | Out-Null
+          }
+      - name: Bundle
+        shell: pwsh
+        run: script/bundle-windows.ps1 -Architecture x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Zed-x86_64.exe
+          path: target/Zed-x86_64.exe
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [bundle_linux_x86_64, bundle_mac_aarch64, bundle_windows_x86_64]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" artifacts/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "Zed fork ${GITHUB_REF_NAME}" \
+            --notes "Unsigned builds of this Zed fork. macOS and Windows warn that the app is from an unidentified developer the first time it opens."
