@@ -115,6 +115,16 @@ enum SaveDestination {
 }
 
 impl NotebookEditor {
+    fn notebook_directory(
+        project: &Entity<Project>,
+        notebook_item: &Entity<NotebookItem>,
+        cx: &App,
+    ) -> Option<PathBuf> {
+        let project_path = notebook_item.read(cx).project_path.clone();
+        let absolute_path = project.read(cx).absolute_path(&project_path, cx)?;
+        absolute_path.parent().map(PathBuf::from)
+    }
+
     pub fn new(
         project: Entity<Project>,
         notebook_item: Entity<NotebookItem>,
@@ -135,12 +145,20 @@ impl NotebookEditor {
         let mut cell_order = vec![]; // Vec<CellId>
         let mut cell_map = HashMap::default(); // HashMap<CellId, Cell>
 
+        let base_directory = Self::notebook_directory(&project, &notebook_item, cx);
         let cell_count = notebook_item.read(cx).notebook.cells.len();
         for index in 0..cell_count {
             let cell = notebook_item.read(cx).notebook.cells[index].clone();
             let cell_id = cell.id();
             cell_order.push(cell_id.clone());
-            let cell_entity = Cell::load(&cell, &languages, notebook_language.clone(), window, cx);
+            let cell_entity = Cell::load(
+                &cell,
+                &languages,
+                notebook_language.clone(),
+                base_directory.clone(),
+                window,
+                cx,
+            );
 
             match &cell_entity {
                 Cell::Code(code_cell) => {
@@ -854,6 +872,7 @@ impl NotebookEditor {
     fn add_markdown_block(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let new_cell_id: CellId = Uuid::new_v4().into();
         let languages = self.languages.clone();
+        let base_directory = Self::notebook_directory(&self.project, &self.notebook_item, cx);
         let metadata: nbformat::v4::CellMetadata =
             serde_json::from_str("{}").expect("empty object should parse");
 
@@ -863,6 +882,7 @@ impl NotebookEditor {
                 metadata,
                 String::new(),
                 languages,
+                base_directory,
                 window,
                 cx,
             )
@@ -1971,12 +1991,20 @@ impl Item for NotebookEditor {
             this.update_in(cx, |this, window, cx| {
                 let mut cell_order = vec![];
                 let mut cell_map = HashMap::default();
+                let base_directory =
+                    Self::notebook_directory(&this.project, &this.notebook_item, cx);
 
                 for cell in notebook.cells.iter() {
                     let cell_id = cell.id();
                     cell_order.push(cell_id.clone());
-                    let cell_entity =
-                        Cell::load(cell, &languages, notebook_language.clone(), window, cx);
+                    let cell_entity = Cell::load(
+                        cell,
+                        &languages,
+                        notebook_language.clone(),
+                        base_directory.clone(),
+                        window,
+                        cx,
+                    );
                     cell_map.insert(cell_id.clone(), cell_entity);
                 }
 

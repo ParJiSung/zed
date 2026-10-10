@@ -1,11 +1,12 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use editor::{Editor, EditorMode, MultiBuffer, SizingBehavior};
 use futures::future::Shared;
 use gpui::{
-    App, Entity, EventEmitter, Focusable, Hsla, InteractiveElement, RetainAllImageCache,
-    StatefulInteractiveElement, Task, prelude::*,
+    App, Entity, EventEmitter, Focusable, Hsla, ImageSource, InteractiveElement, Resource,
+    RetainAllImageCache, SharedUri, StatefulInteractiveElement, Task, prelude::*,
 };
 use language::{Buffer, Language, LanguageRegistry};
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
@@ -180,6 +181,7 @@ impl Cell {
         cell: &nbformat::v4::Cell,
         languages: &Arc<LanguageRegistry>,
         notebook_language: Shared<Task<Option<Arc<Language>>>>,
+        base_directory: Option<PathBuf>,
         window: &mut Window,
         cx: &mut App,
     ) -> Self {
@@ -198,6 +200,7 @@ impl Cell {
                         metadata.clone(),
                         source,
                         languages.clone(),
+                        base_directory,
                         window,
                         cx,
                     )
@@ -387,6 +390,7 @@ pub struct MarkdownCell {
     metadata: CellMetadata,
     image_cache: Entity<RetainAllImageCache>,
     source: String,
+    base_directory: Option<PathBuf>,
     editor: Entity<Editor>,
     markdown: Entity<Markdown>,
     editing: bool,
@@ -403,6 +407,7 @@ impl MarkdownCell {
         metadata: CellMetadata,
         source: String,
         languages: Arc<LanguageRegistry>,
+        base_directory: Option<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -459,6 +464,7 @@ impl MarkdownCell {
             metadata,
             image_cache: RetainAllImageCache::new(cx),
             source,
+            base_directory,
             editor,
             markdown,
             editing: start_editing,
@@ -573,6 +579,27 @@ impl RenderableCell for MarkdownCell {
     }
 }
 
+fn resolve_markdown_image(
+    destination_url: &str,
+    base_directory: Option<&Path>,
+) -> Option<ImageSource> {
+    if destination_url.starts_with("http://") || destination_url.starts_with("https://") {
+        return Some(ImageSource::Resource(Resource::Uri(SharedUri::from(
+            destination_url.to_string(),
+        ))));
+    }
+
+    let path = Path::new(destination_url);
+    let resolved_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base_directory?.join(path)
+    };
+    Some(ImageSource::Resource(Resource::Path(Arc::from(
+        resolved_path.as_path(),
+    ))))
+}
+
 impl Render for MarkdownCell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // If editing, show the editor
@@ -638,7 +665,17 @@ impl Render for MarkdownCell {
                                 window.focus(&this.editor.focus_handle(cx), cx);
                                 cx.notify();
                             }))
-                            .child(MarkdownElement::new(self.markdown.clone(), style)),
+                            .child(
+                                MarkdownElement::new(self.markdown.clone(), style).image_resolver({
+                                    let base_directory = self.base_directory.clone();
+                                    move |destination_url, _cx| {
+                                        resolve_markdown_image(
+                                            destination_url,
+                                            base_directory.as_deref(),
+                                        )
+                                    }
+                                }),
+                            ),
                     ),
             )
             .children(self.cell_position_spacer(false, window, cx))
