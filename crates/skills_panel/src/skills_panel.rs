@@ -355,7 +355,7 @@ impl SkillsPanel {
             project,
             fs,
             focus_handle: cx.focus_handle(),
-            position: DockPosition::Left,
+            position: DockPosition::Right,
             active: false,
             skills: Vec::new(),
             refresh_task: Task::ready(()),

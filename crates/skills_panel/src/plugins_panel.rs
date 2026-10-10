@@ -82,7 +82,7 @@ impl PluginsPanel {
             workspace,
             fs,
             focus_handle: cx.focus_handle(),
-            position: DockPosition::Left,
+            position: DockPosition::Right,
             active: false,
             plugins: Vec::new(),
             refresh_task: Task::ready(()),
