@@ -666,15 +666,17 @@ impl Render for MarkdownCell {
                                 cx.notify();
                             }))
                             .child(
-                                MarkdownElement::new(self.markdown.clone(), style).image_resolver({
-                                    let base_directory = self.base_directory.clone();
-                                    move |destination_url, _cx| {
-                                        resolve_markdown_image(
-                                            destination_url,
-                                            base_directory.as_deref(),
-                                        )
-                                    }
-                                }),
+                                MarkdownElement::new(self.markdown.clone(), style).image_resolver(
+                                    {
+                                        let base_directory = self.base_directory.clone();
+                                        move |destination_url, _cx| {
+                                            resolve_markdown_image(
+                                                destination_url,
+                                                base_directory.as_deref(),
+                                            )
+                                        }
+                                    },
+                                ),
                             ),
                     ),
             )
