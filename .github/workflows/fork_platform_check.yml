@@ -5,6 +5,7 @@ name: fork_platform_check
 on:
   push:
     branches:
+      - main
       - skills-panel
   workflow_dispatch:
 
