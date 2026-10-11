@@ -7,6 +7,15 @@ PARENT_WINDOW = int(sys.argv[2]) if len(sys.argv) > 2 else None
 
 if PARENT_WINDOW is not None:
     os.environ["GDK_BACKEND"] = "x11"
+# Decode video on the GPU when GStreamer's VA-API decoders are installed;
+# software decoding is what makes reels stutter on laptops.
+os.environ.setdefault(
+    "GST_PLUGIN_FEATURE_RANK",
+    "vah264dec:MAX,vah265dec:MAX,vavp9dec:MAX,vaav1dec:MAX",
+)
+# With hardware decoding, WebKit's DMA-BUF video sink shows only a few frames
+# per second and repeats old ones. Without it, reels play at full frame rate.
+os.environ.setdefault("WEBKIT_GST_DMABUF_SINK_DISABLED", "1")
 
 import gi
 
@@ -19,7 +28,92 @@ if PARENT_WINDOW is not None:
 from gi.repository import Gdk, GLib, Gtk, WebKit2
 
 REELS_URL = "https://www.instagram.com/reels/"
+# WebKitGTK reports AV1 as playable once GStreamer's AV1 decoders are
+# installed, but Instagram's AV1 streams then stall on the first frame. Hiding
+# AV1 from the page makes Instagram serve H.264, which plays and can be
+# decoded on the GPU.
+HIDE_AV1_SCRIPT = """
+(() => {
+    const isAv1 = (type) => /av01/i.test(type || "");
+    if (window.MediaSource) {
+        const isTypeSupported = MediaSource.isTypeSupported.bind(MediaSource);
+        MediaSource.isTypeSupported = (type) => !isAv1(type) && isTypeSupported(type);
+    }
+    const canPlayType = HTMLMediaElement.prototype.canPlayType;
+    HTMLMediaElement.prototype.canPlayType = function (type) {
+        return isAv1(type) ? "" : canPlayType.call(this, type);
+    };
+    const capabilities = navigator.mediaCapabilities;
+    if (capabilities && capabilities.decodingInfo) {
+        const decodingInfo = capabilities.decodingInfo.bind(capabilities);
+        capabilities.decodingInfo = (configuration) =>
+            isAv1(configuration && configuration.video && configuration.video.contentType)
+                ? Promise.resolve({ supported: false, smooth: false, powerEfficient: false })
+                : decodingInfo(configuration);
+    }
+})();
+"""
 REVERT_TO_PARENT = 2
+
+
+# Embedded in Zed, the Reels window shows on top of the editor but Zed keeps
+# keyboard focus. Instagram treats an unfocused page as a background tab and
+# keeps restarting and then stops its videos, so the page is told it is
+# focused and visible; the helper pauses playback itself when it is hidden.
+ALWAYS_ACTIVE_SCRIPT = """
+(() => {
+    Document.prototype.hasFocus = () => true;
+    Object.defineProperty(Document.prototype, "visibilityState", { get: () => "visible" });
+    Object.defineProperty(Document.prototype, "hidden", { get: () => false });
+    for (const type of ["blur", "focusout", "visibilitychange", "pagehide", "freeze"]) {
+        window.addEventListener(type, (event) => event.stopImmediatePropagation(), true);
+        document.addEventListener(type, (event) => event.stopImmediatePropagation(), true);
+    }
+})();
+"""
+# When a reel ends, Instagram rewinds it to loop and then pauses it again a
+# moment later, leaving it frozen at the start. A pause that soon after the
+# end is undone, so reels loop like they do in the Instagram app.
+KEEP_LOOPING_SCRIPT = """
+(() => {
+    const endedAt = new WeakMap();
+    document.addEventListener("ended", (event) => {
+        if (event.target.tagName === "VIDEO") {
+            endedAt.set(event.target, performance.now());
+        }
+    }, true);
+    document.addEventListener("pause", (event) => {
+        const video = event.target;
+        const ended = video.tagName === "VIDEO" && endedAt.get(video);
+        if (ended && performance.now() - ended < 3000 && !window.__zedHidden) {
+            endedAt.delete(video);
+            setTimeout(() => video.play().catch(() => {}), 0);
+        }
+    }, true);
+})();
+"""
+PAUSE_SCRIPT = """
+window.__zedHidden = true;
+window.__zedPausedVideos = [...document.querySelectorAll("video")].filter((video) => !video.paused);
+window.__zedPausedVideos.forEach((video) => video.pause());
+"""
+RESUME_SCRIPT = """
+window.__zedHidden = false;
+(window.__zedPausedVideos || []).forEach((video) => video.play().catch(() => {}));
+window.__zedPausedVideos = [];
+"""
+
+
+def add_user_script(web_view, source):
+    web_view.get_user_content_manager().add_script(
+        WebKit2.UserScript.new(
+            source,
+            WebKit2.UserContentInjectedFrames.ALL_FRAMES,
+            WebKit2.UserScriptInjectionTime.START,
+            None,
+            None,
+        )
+    )
 
 
 def build_web_view():
@@ -33,6 +127,8 @@ def build_web_view():
         WebKit2.CookiePersistentStorage.SQLITE,
     )
     web_view = WebKit2.WebView.new_with_context(context)
+    add_user_script(web_view, HIDE_AV1_SCRIPT)
+    add_user_script(web_view, KEEP_LOOPING_SCRIPT)
     web_view.get_settings().set_media_playback_requires_user_gesture(False)
     web_view.load_uri(REELS_URL)
     return web_view
@@ -61,6 +157,7 @@ def run_embedded():
     window.set_accept_focus(True)
     window.set_focus_on_map(False)
     web_view = build_web_view()
+    add_user_script(web_view, ALWAYS_ACTIVE_SCRIPT)
     window.add(web_view)
     window.realize()
     gdk_window = window.get_window()
@@ -82,6 +179,7 @@ def run_embedded():
     def update_placement():
         if not (state["visible"] and zed_or_reels_is_active()):
             if window.get_visible():
+                web_view.evaluate_javascript(PAUSE_SCRIPT, -1, None, None, None, None)
                 window.hide()
             return True
         origin = parent_window.get_origin()
@@ -95,6 +193,7 @@ def run_embedded():
         if not window.get_visible():
             window.show_all()
             window.move(placement[0], placement[1])
+            web_view.evaluate_javascript(RESUME_SCRIPT, -1, None, None, None, None)
         return True
 
     def press_key(keyval):
@@ -141,7 +240,7 @@ def run_embedded():
         GLib.idle_add(Gtk.main_quit)
 
     threading.Thread(target=read_commands, daemon=True).start()
-    GLib.timeout_add(60, update_placement)
+    GLib.timeout_add(30, update_placement)
     Gtk.main()
 
 
