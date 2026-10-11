@@ -1,4 +1,5 @@
 use std::{
+    ops::Range,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -8,7 +9,7 @@ use credentials_provider::CredentialsProvider;
 use futures::StreamExt as _;
 use gpui::{
     AnyElement, AsyncWindowContext, Entity, FocusHandle, ImageSource, Resource, SharedUri, Task,
-    WeakEntity, img,
+    UniformListScrollHandle, WeakEntity, img, uniform_list,
 };
 use http_client::HttpClient;
 use librespot_core::authentication::Credentials;
@@ -21,7 +22,7 @@ use workspace::{Workspace, dock::DockPosition, notifications::DetachAndPromptErr
 
 use crate::{
     ToggleSpotifyFocus, empty_message, poll_task,
-    spotify_api::{Playback, Playlist, SpotifyClient, Track, Transport},
+    spotify_api::{MAX_PAGES, Playback, Playlist, SpotifyClient, Track, Transport},
     spotify_player::{self, PlayerUpdate, SpotifyPlayer},
 };
 
@@ -71,6 +72,7 @@ pub struct SpotifyPanel {
     tracks: Vec<Track>,
     queue: Vec<Track>,
     library_error: Option<SharedString>,
+    library_scroll: UniformListScrollHandle,
     library_task: Task<()>,
     player_task: Task<()>,
     refresh_task: Task<()>,
@@ -110,6 +112,7 @@ impl SpotifyPanel {
             tracks: Vec::new(),
             queue: Vec::new(),
             library_error: None,
+            library_scroll: UniformListScrollHandle::new(),
             library_task: Task::ready(()),
             player_task: Task::ready(()),
             refresh_task: Task::ready(()),
@@ -495,14 +498,50 @@ impl SpotifyPanel {
     }
 
     fn open_playlist(&mut self, playlist: Playlist, cx: &mut Context<Self>) {
+        let Some(spotify) = self.spotify.clone() else {
+            return;
+        };
         let playlist_id = playlist.id.clone();
         self.library_view = LibraryView::Playlist(playlist);
         self.tracks.clear();
-        self.load_library(
-            cx,
-            async move |spotify, cx| spotify.playlist_tracks(&playlist_id, cx).await,
-            |panel, tracks| panel.tracks = tracks,
-        );
+        self.library_error = None;
+        self.library_scroll = UniformListScrollHandle::new();
+        // Each page is shown as soon as it arrives; a long playlist such as
+        // Liked Songs can take dozens of requests to load completely.
+        self.library_task = cx.spawn(async move |this, cx| {
+            let mut next_page = None;
+            for _ in 0..MAX_PAGES {
+                let result = spotify
+                    .playlist_tracks_page(&playlist_id, next_page.as_deref(), cx)
+                    .await;
+                let Ok(keep_going) = this.update(cx, |panel, cx| {
+                    let still_showing = matches!(
+                        &panel.library_view,
+                        LibraryView::Playlist(shown) if shown.id == playlist_id
+                    );
+                    if !still_showing {
+                        return false;
+                    }
+                    cx.notify();
+                    match result {
+                        Ok((tracks, next)) => {
+                            panel.tracks.extend(tracks);
+                            next_page = next;
+                            next_page.is_some()
+                        }
+                        Err(error) => {
+                            panel.library_error = Some(format!("{error:#}").into());
+                            false
+                        }
+                    }
+                }) else {
+                    return;
+                };
+                if !keep_going {
+                    return;
+                }
+            }
+        });
         cx.notify();
     }
 
@@ -678,64 +717,10 @@ impl SpotifyPanel {
                 .into_any_element(),
             Account::SignedIn => {
                 let showing_queue = self.library_view == LibraryView::Queue;
-                let rows: Vec<AnyElement> = match &self.library_view {
-                    LibraryView::Playlists => self
-                        .playlists
-                        .iter()
-                        .enumerate()
-                        .map(|(index, playlist)| {
-                            let playlist = playlist.clone();
-                            library_row(
-                                ("spotify-playlist", index),
-                                playlist.name.clone(),
-                                format!("{} songs", playlist.track_count).into(),
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.open_playlist(playlist.clone(), cx)
-                            }))
-                            .into_any_element()
-                        })
-                        .collect(),
-                    LibraryView::Playlist(playlist) => self
-                        .tracks
-                        .iter()
-                        .enumerate()
-                        .map(|(index, track)| {
-                            let context_uri = playlist.uri.clone();
-                            let track_uri = track.uri.clone();
-                            library_row(
-                                ("spotify-track", index),
-                                track.name.clone(),
-                                track.artists.clone(),
-                            )
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.play(
-                                    Some(context_uri.clone()),
-                                    Some(track_uri.clone()),
-                                    window,
-                                    cx,
-                                )
-                            }))
-                            .into_any_element()
-                        })
-                        .collect(),
-                    LibraryView::Queue => self
-                        .queue
-                        .iter()
-                        .enumerate()
-                        .map(|(index, track)| {
-                            let track_uri = track.uri.clone();
-                            library_row(
-                                ("spotify-queue", index),
-                                track.name.clone(),
-                                track.artists.clone(),
-                            )
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.play(None, Some(track_uri.clone()), window, cx)
-                            }))
-                            .into_any_element()
-                        })
-                        .collect(),
+                let row_count = match &self.library_view {
+                    LibraryView::Playlists => self.playlists.len(),
+                    LibraryView::Playlist(_) => self.tracks.len(),
+                    LibraryView::Queue => self.queue.len(),
                 };
 
                 let playlist_header = match &self.library_view {
@@ -772,7 +757,7 @@ impl SpotifyPanel {
                     _ => None,
                 };
 
-                let is_empty = rows.is_empty();
+                let is_empty = row_count == 0;
                 v_flex()
                     .flex_1()
                     .min_h_0()
@@ -815,23 +800,105 @@ impl SpotifyPanel {
                     )
                     .children(playlist_header)
                     .children(error)
+                    .when(is_empty, |library| {
+                        library.child(empty_message(if showing_queue {
+                            "The queue is empty."
+                        } else {
+                            "Loading…"
+                        }))
+                    })
+                    // Only the rows in view are built, which keeps the panel
+                    // responsive with thousands of songs.
                     .child(
-                        v_flex()
-                            .id("spotify-library")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .when(is_empty, |list| {
-                                list.child(empty_message(if showing_queue {
-                                    "The queue is empty."
-                                } else {
-                                    "Loading…"
-                                }))
-                            })
-                            .children(rows),
+                        uniform_list(
+                            "spotify-library",
+                            row_count,
+                            cx.processor(|panel, range: Range<usize>, _window, cx| {
+                                panel.render_library_rows(range, cx)
+                            }),
+                        )
+                        .track_scroll(&self.library_scroll)
+                        .flex_1()
+                        .min_h_0(),
                     )
                     .into_any_element()
             }
+        }
+    }
+}
+
+impl SpotifyPanel {
+    fn render_library_rows(
+        &mut self,
+        range: Range<usize>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        match &self.library_view {
+            LibraryView::Playlists => self
+                .playlists
+                .get(range.clone())
+                .unwrap_or_default()
+                .iter()
+                .zip(range)
+                .map(|(playlist, index)| {
+                    let playlist = playlist.clone();
+                    library_row(
+                        ("spotify-playlist", index),
+                        playlist.name.clone(),
+                        format!("{} songs", playlist.track_count).into(),
+                    )
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.open_playlist(playlist.clone(), cx)),
+                    )
+                    .into_any_element()
+                })
+                .collect(),
+            LibraryView::Playlist(playlist) => {
+                let context_uri = playlist.uri.clone();
+                self.tracks
+                    .get(range.clone())
+                    .unwrap_or_default()
+                    .iter()
+                    .zip(range)
+                    .map(|(track, index)| {
+                        let context_uri = context_uri.clone();
+                        let track_uri = track.uri.clone();
+                        library_row(
+                            ("spotify-track", index),
+                            track.name.clone(),
+                            track.artists.clone(),
+                        )
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.play(
+                                Some(context_uri.clone()),
+                                Some(track_uri.clone()),
+                                window,
+                                cx,
+                            )
+                        }))
+                        .into_any_element()
+                    })
+                    .collect()
+            }
+            LibraryView::Queue => self
+                .queue
+                .get(range.clone())
+                .unwrap_or_default()
+                .iter()
+                .zip(range)
+                .map(|(track, index)| {
+                    let track_uri = track.uri.clone();
+                    library_row(
+                        ("spotify-queue", index),
+                        track.name.clone(),
+                        track.artists.clone(),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.play(None, Some(track_uri.clone()), window, cx)
+                    }))
+                    .into_any_element()
+                })
+                .collect(),
         }
     }
 }

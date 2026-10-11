@@ -30,7 +30,7 @@ const CALLBACK_HOST: &str = "127.0.0.1";
 const CALLBACK_PORT: u16 = 8898;
 const CALLBACK_PATH: &str = "/callback";
 /// Guards against a malformed `next` link looping forever.
-const MAX_PAGES: usize = 500;
+pub(crate) const MAX_PAGES: usize = 500;
 const LIKED_SONGS_ID: &str = "liked-songs";
 
 #[derive(Clone, Debug, PartialEq)]
@@ -281,40 +281,52 @@ impl SpotifyClient {
         Ok(playlists)
     }
 
-    pub async fn playlist_tracks(&self, playlist_id: &str, cx: &AsyncApp) -> Result<Vec<Track>> {
-        if playlist_id == LIKED_SONGS_ID {
-            return self
-                .all_pages(format!("{API_URL}/me/tracks?limit=50"), cx, |entry| {
-                    track_from_json(&entry["track"])
-                })
-                .await;
-        }
-        // Spotify renamed this endpoint from `/tracks` to `/items`; try both.
-        let parse = |entry: &Value| {
-            if entry["item"].is_object() {
-                track_from_json(&entry["item"])
-            } else {
-                track_from_json(&entry["track"])
+    /// Fetches one page of a playlist's songs, returning them with the URL of
+    /// the next page. Callers show each page as it arrives instead of waiting
+    /// for a long playlist to load completely.
+    pub async fn playlist_tracks_page(
+        &self,
+        playlist_id: &str,
+        next_page: Option<&str>,
+        cx: &AsyncApp,
+    ) -> Result<(Vec<Track>, Option<String>)> {
+        let page = match next_page {
+            Some(url) => self.get_json(url, cx).await?,
+            None if playlist_id == LIKED_SONGS_ID => {
+                self.get_json(&format!("{API_URL}/me/tracks?limit=50"), cx)
+                    .await?
             }
-        };
-        match self
-            .all_pages(
-                format!("{API_URL}/playlists/{playlist_id}/items?limit=100"),
-                cx,
-                parse,
-            )
-            .await
-        {
-            Ok(tracks) => Ok(tracks),
-            Err(_) => {
-                self.all_pages(
-                    format!("{API_URL}/playlists/{playlist_id}/tracks?limit=100"),
+            // Spotify renamed this endpoint from `/tracks` to `/items`; try both.
+            None => match self
+                .get_json(
+                    &format!("{API_URL}/playlists/{playlist_id}/items?limit=100"),
                     cx,
-                    parse,
                 )
                 .await
-            }
-        }
+            {
+                Ok(page) => page,
+                Err(_) => {
+                    self.get_json(
+                        &format!("{API_URL}/playlists/{playlist_id}/tracks?limit=100"),
+                        cx,
+                    )
+                    .await?
+                }
+            },
+        };
+        let tracks = page["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                if entry["item"].is_object() {
+                    track_from_json(&entry["item"])
+                } else {
+                    track_from_json(&entry["track"])
+                }
+            })
+            .collect();
+        Ok((tracks, page["next"].as_str().map(str::to_string)))
     }
 
     pub async fn queue(&self, cx: &AsyncApp) -> Result<Vec<Track>> {
