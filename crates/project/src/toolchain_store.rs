@@ -524,7 +524,14 @@ impl LocalToolchainStore {
                 .ok()
                 .flatten()?;
             let worktree_id = snapshot.id();
-            let worktree_root = snapshot.abs_path().to_path_buf();
+            // A single-file worktree's root is the file itself, so look for environments next to it.
+            let single_file_directory = snapshot
+                .root_entry()
+                .filter(|entry| entry.is_file())
+                .and_then(|_| snapshot.abs_path().parent().map(PathBuf::from));
+            let worktree_root = single_file_directory
+                .clone()
+                .unwrap_or_else(|| snapshot.abs_path().to_path_buf());
             let delegate =
                 Arc::from(ManifestQueryDelegate::new(snapshot)) as Arc<dyn ManifestDelegate>;
             let relative_path = manifest_tree
@@ -536,7 +543,9 @@ impl LocalToolchainStore {
                     path: Arc::from(RelPath::empty()),
                     worktree_id,
                 });
-            let abs_path = worktree.update(cx, |this, _| this.absolutize(&relative_path.path));
+            let abs_path = single_file_directory.unwrap_or_else(|| {
+                worktree.update(cx, |this, _| this.absolutize(&relative_path.path))
+            });
 
             let project_env = environment
                 .update(cx, |environment, cx| {

@@ -1540,6 +1540,48 @@ async fn test_single_file_worktree_is_not_an_lsp_workspace_folder(cx: &mut gpui:
 }
 
 #[gpui::test]
+async fn test_single_file_worktree_finds_toolchains_next_to_the_file(
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/the-root"),
+        json!({
+            ".venv": {},
+            "notebook.py": ""
+        }),
+    )
+    .await;
+
+    let project = Project::test(fs.clone(), [path!("/the-root/notebook.py").as_ref()], cx).await;
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(python_lang(fs));
+    cx.run_until_parked();
+
+    let Toolchains { toolchains, .. } = project
+        .update(cx, |project, cx| {
+            let worktree_id = project.worktrees(cx).next().unwrap().read(cx).id();
+            project.available_toolchains(
+                ProjectPath {
+                    worktree_id,
+                    path: RelPath::empty_arc(),
+                },
+                LanguageName::new_static("Python"),
+                cx,
+            )
+        })
+        .await
+        .expect("A toolchain to be discovered");
+    let toolchain_paths = toolchains
+        .toolchains()
+        .iter()
+        .map(|toolchain| toolchain.path.to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(toolchain_paths, vec![path!("/the-root/.venv").to_string()]);
+}
+
+#[gpui::test]
 async fn test_running_multiple_instances_of_a_single_server_in_one_worktree(
     cx: &mut gpui::TestAppContext,
 ) {
