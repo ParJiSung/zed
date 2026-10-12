@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result};
 use collections::{HashMap, HashSet};
 use command_palette_hooks::CommandPaletteFilter;
+use futures::channel::oneshot;
 use gpui::{
     App, Context, Entity, EntityId, Global, SharedString, Subscription, Task, TaskExt, prelude::*,
 };
@@ -35,6 +36,8 @@ pub struct ReplStore {
     active_python_toolchain_for_worktree: HashMap<WorktreeId, SharedString>,
     remote_worktrees: HashSet<WorktreeId>,
     fetching_python_kernelspecs: HashSet<WorktreeId>,
+    python_kernelspec_refresh_waiters:
+        HashMap<WorktreeId, Vec<oneshot::Sender<Result<(), String>>>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -70,6 +73,7 @@ impl ReplStore {
             active_python_toolchain_for_worktree: HashMap::default(),
             remote_worktrees: HashSet::default(),
             fetching_python_kernelspecs: HashSet::default(),
+            python_kernelspec_refresh_waiters: HashMap::default(),
         };
         this.on_enabled_changed(cx);
         this
@@ -162,7 +166,17 @@ impl ReplStore {
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
         if !self.fetching_python_kernelspecs.insert(worktree_id) {
-            return Task::ready(Ok(()));
+            let (sender, receiver) = oneshot::channel();
+            self.python_kernelspec_refresh_waiters
+                .entry(worktree_id)
+                .or_default()
+                .push(sender);
+            return cx.background_spawn(async move {
+                receiver
+                    .await
+                    .map_err(|_| anyhow::anyhow!("python kernelspec refresh was cancelled"))?
+                    .map_err(anyhow::Error::msg)
+            });
         }
 
         let is_remote = project.read(cx).is_remote();
@@ -185,19 +199,34 @@ impl ReplStore {
         );
 
         cx.spawn(async move |this, cx| {
-            let kernel_specifications_res = kernel_specifications_task.await;
-
-            this.update(cx, |this, _cx| {
-                this.fetching_python_kernelspecs.remove(&worktree_id);
-            })
-            .ok();
-
-            let kernel_specifications =
-                kernel_specifications_res.context("getting python kernelspecs")?;
+            let kernel_specifications = match kernel_specifications_task
+                .await
+                .context("getting python kernelspecs")
+            {
+                Ok(kernel_specifications) => kernel_specifications,
+                Err(error) => {
+                    let error_message = error.to_string();
+                    this.update(cx, |this, _cx| {
+                        this.fetching_python_kernelspecs.remove(&worktree_id);
+                        if let Some(waiters) =
+                            this.python_kernelspec_refresh_waiters.remove(&worktree_id)
+                        {
+                            for waiter in waiters {
+                                if waiter.send(Err(error_message.clone())).is_err() {
+                                    log::debug!("Python kernelspec refresh waiter was dropped");
+                                }
+                            }
+                        }
+                    })
+                    .ok();
+                    return Err(error);
+                }
+            };
 
             let active_toolchain_path = active_toolchain.await.map(|toolchain| toolchain.path);
 
             this.update(cx, |this, cx| {
+                this.fetching_python_kernelspecs.remove(&worktree_id);
                 this.kernel_specifications_for_worktree
                     .insert(worktree_id, kernel_specifications);
                 if let Some(path) = active_toolchain_path {
@@ -209,8 +238,17 @@ impl ReplStore {
                 } else {
                     this.remote_worktrees.remove(&worktree_id);
                 }
+                if let Some(waiters) = this.python_kernelspec_refresh_waiters.remove(&worktree_id) {
+                    for waiter in waiters {
+                        if waiter.send(Ok(())).is_err() {
+                            log::debug!("Python kernelspec refresh waiter was dropped");
+                        }
+                    }
+                }
                 cx.notify();
-            })
+            })?;
+
+            Ok(())
         })
     }
 

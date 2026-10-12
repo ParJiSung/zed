@@ -233,9 +233,9 @@ impl NotebookEditor {
             execution_requests: HashMap::default(),
             kernel_picker_handle: PopoverMenuHandle::default(),
         };
-        editor.launch_kernel(window, cx);
         editor.refresh_language(cx);
-        editor.refresh_kernelspecs(cx);
+        let refresh_task = editor.refresh_kernelspecs(cx);
+        editor.launch_kernel(refresh_task, window, cx);
 
         cx.subscribe(&notebook_item, |this, _item, _event, cx| {
             this.refresh_language(cx);
@@ -245,7 +245,7 @@ impl NotebookEditor {
         editor
     }
 
-    fn refresh_kernelspecs(&mut self, cx: &mut Context<Self>) {
+    fn refresh_kernelspecs(&mut self, cx: &mut Context<Self>) -> Task<Result<()>> {
         let store = ReplStore::global(cx);
         let project = self.project.clone();
         let worktree_id = self.worktree_id;
@@ -254,7 +254,7 @@ impl NotebookEditor {
             store.refresh_python_kernelspecs(worktree_id, &project, cx)
         });
 
-        cx.background_spawn(refresh_task).detach_and_log_err(cx);
+        cx.background_spawn(refresh_task)
     }
 
     fn refresh_language(&mut self, cx: &mut Context<Self>) {
@@ -397,14 +397,18 @@ impl NotebookEditor {
         })
     }
 
-    fn launch_kernel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let spec = self.kernel_specification.clone().or_else(|| {
-            ReplStore::global(cx)
-                .read(cx)
-                .active_kernelspec(self.worktree_id, None, cx)
-        });
+    fn launch_kernel(
+        &mut self,
+        refresh_task: Task<Result<()>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(spec) = self.kernel_specification.clone() {
+            self.launch_kernel_with_spec(spec, window, cx);
+            return;
+        }
 
-        let spec = spec.unwrap_or_else(|| {
+        let fallback_specification = || {
             KernelSpecification::Jupyter(LocalKernelSpecification {
                 name: "python3".to_string(),
                 path: PathBuf::from("python3"),
@@ -423,9 +427,31 @@ impl NotebookEditor {
                     env: None,
                 },
             })
-        });
+        };
+        let store = ReplStore::global(cx);
+        let worktree_id = self.worktree_id;
+        let notebook_language = self.notebook_language.clone();
+        let pending_kernel = cx
+            .spawn_in(window, async move |this, cx| {
+                let language = notebook_language.await;
+                if let Err(error) = refresh_task.await {
+                    log::error!("failed to refresh Python kernelspecs: {error:#}");
+                }
+                let spec = store
+                    .read_with(cx, |store, cx| {
+                        store.active_kernelspec(worktree_id, language, cx)
+                    })
+                    .unwrap_or_else(fallback_specification);
 
-        self.launch_kernel_with_spec(spec, window, cx);
+                this.update_in(cx, |editor, window, cx| {
+                    editor.launch_kernel_with_spec(spec, window, cx);
+                })
+                .ok();
+            })
+            .shared();
+
+        self.kernel = Kernel::StartingKernel(pending_kernel);
+        cx.notify();
     }
 
     fn launch_kernel_with_spec(
@@ -435,11 +461,7 @@ impl NotebookEditor {
         cx: &mut Context<Self>,
     ) {
         let entity_id = cx.entity_id();
-        let working_directory = self
-            .project
-            .read(cx)
-            .worktree_for_id(self.worktree_id, cx)
-            .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
+        let working_directory = Self::notebook_directory(&self.project, &self.notebook_item, cx)
             .unwrap_or_else(std::env::temp_dir);
         let fs = self.project.read(cx).fs().clone();
         let view = cx.entity();
@@ -619,6 +641,7 @@ impl NotebookEditor {
                 }
                 cx.notify();
             });
+            self.notify_cell_changed(&cell_id, cx);
         }
 
         if let Err(error) = send_result {
@@ -632,6 +655,13 @@ impl NotebookEditor {
         self.cell_order
             .get(self.selected_cell_index)
             .and_then(|cell_id| self.cell_map.get(cell_id))
+    }
+
+    fn notify_cell_changed(&mut self, cell_id: &CellId, cx: &mut Context<Self>) {
+        if let Some(index) = self.cell_order.iter().position(|id| id == cell_id) {
+            self.cell_list.remeasure_items(index..index + 1);
+        }
+        cx.notify();
     }
 
     fn has_outputs(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -2055,6 +2085,8 @@ impl KernelSession for NotebookEditor {
                     cell.update(cx, |cell, cx| {
                         cell.handle_message(message, window, cx);
                     });
+                    let cell_id = cell_id.clone();
+                    self.notify_cell_changed(&cell_id, cx);
                 }
             }
         }
@@ -2184,13 +2216,21 @@ mod tests {
             cx.new(|cx| NotebookEditor::new(project.clone(), notebook_item, window, cx))
         });
 
-        // Creating the editor launches the kernel. Wait for the actual launch
-        // task, which fails because the interpreter cannot be spawned.
-        let pending_kernel = editor.read_with(cx, |editor, _| match &editor.kernel {
-            Kernel::StartingKernel(task) => task.clone(),
-            _ => panic!("kernel should be starting right after the editor is created"),
+        // Creating the editor first selects a kernel, then launches it; each phase
+        // is its own starting task. Wait for both: the launch fails because the
+        // interpreter cannot be spawned.
+        editor.read_with(cx, |editor, _| {
+            assert!(
+                matches!(editor.kernel, Kernel::StartingKernel(_)),
+                "kernel should be starting right after the editor is created"
+            );
         });
-        pending_kernel.await;
+        while let Some(pending_kernel) = editor.read_with(cx, |editor, _| match &editor.kernel {
+            Kernel::StartingKernel(task) => Some(task.clone()),
+            _ => None,
+        }) {
+            pending_kernel.await;
+        }
 
         editor.read_with(cx, |editor, _| {
             assert!(
@@ -2286,6 +2326,9 @@ mod tests {
         notebook_item.read_with(cx, |item, _| {
             assert_eq!(item.notebook.cells.len(), 1);
         });
+        let notebook_directory =
+            cx.update(|cx| NotebookEditor::notebook_directory(&project, &notebook_item, cx));
+        assert_eq!(notebook_directory, Some(PathBuf::from("/notebooks")));
     }
 
     /// Notebooks must be saved through the project rather than through the
