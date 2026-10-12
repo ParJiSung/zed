@@ -155,37 +155,6 @@ impl NativeRunningKernel {
                 std::process::Stdio::piped(),
             )?;
 
-            let session_id = Uuid::new_v4().to_string();
-
-            let iopub_socket =
-                runtimelib::create_client_iopub_connection(&connection_info, "", &session_id)
-                    .await?;
-            let control_socket =
-                runtimelib::create_client_control_connection(&connection_info, &session_id).await?;
-
-            let peer_identity = runtimelib::peer_identity_for_session(&session_id)?;
-            let shell_socket = runtimelib::create_client_shell_connection_with_identity(
-                &connection_info,
-                &session_id,
-                peer_identity.clone(),
-            )
-            .await?;
-            let stdin_socket = runtimelib::create_client_stdin_connection_with_identity(
-                &connection_info,
-                &session_id,
-                peer_identity,
-            )
-            .await?;
-
-            let (request_tx, stdin_tx) = start_kernel_tasks(
-                session.clone(),
-                iopub_socket,
-                shell_socket,
-                control_socket,
-                stdin_socket,
-                cx,
-            );
-
             let stderr = process.stderr.take();
             let stdout = process.stdout.take();
 
@@ -214,6 +183,59 @@ impl NativeRunningKernel {
                 }
             })
             .detach();
+
+            let session_id = Uuid::new_v4().to_string();
+            let socket_setup = async {
+                let iopub_socket = runtimelib::create_client_iopub_connection(
+                    &connection_info,
+                    "",
+                    &session_id,
+                )
+                .await?;
+                let control_socket =
+                    runtimelib::create_client_control_connection(&connection_info, &session_id)
+                        .await?;
+
+                let peer_identity = runtimelib::peer_identity_for_session(&session_id)?;
+                let shell_socket = runtimelib::create_client_shell_connection_with_identity(
+                    &connection_info,
+                    &session_id,
+                    peer_identity.clone(),
+                )
+                .await?;
+                let stdin_socket = runtimelib::create_client_stdin_connection_with_identity(
+                    &connection_info,
+                    &session_id,
+                    peer_identity,
+                )
+                .await?;
+
+                anyhow::Ok((iopub_socket, shell_socket, control_socket, stdin_socket))
+            };
+            futures::pin_mut!(socket_setup);
+
+            let (iopub_socket, shell_socket, control_socket, stdin_socket) = {
+                let process_status = process.status();
+                futures::pin_mut!(process_status);
+                match futures::future::select(socket_setup, process_status).await {
+                    futures::future::Either::Left((sockets, _)) => sockets?,
+                    futures::future::Either::Right((status, _)) => {
+                        let status = status?;
+                        anyhow::bail!(
+                            "kernel process exited during startup with status {status:?}; check that ipykernel is installed in the selected environment"
+                        );
+                    }
+                }
+            };
+
+            let (request_tx, stdin_tx) = start_kernel_tasks(
+                session.clone(),
+                iopub_socket,
+                shell_socket,
+                control_socket,
+                stdin_socket,
+                cx,
+            );
 
             let status = process.status();
 
